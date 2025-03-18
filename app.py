@@ -57,7 +57,7 @@ def get_orders():
         if conditions:
             query += ' WHERE ' + ' AND '.join(conditions)
         
-        query += ' ORDER BY order_date DESC'
+        query += ' ORDER BY order_date DESC, id DESC'
         
         cursor.execute(query, tuple(params))
         rows = cursor.fetchall()
