@@ -374,8 +374,12 @@ def update_order(id):
         )
         conn.commit()
 
+        # 영향을 받은 행이 없는 경우 발주가 존재하는지 확인
         if cursor.rowcount == 0:
-            return jsonify({'error': '발주 정보를 찾을 수 없습니다.'}), 404
+            cursor.execute('SELECT id FROM orders WHERE id = %s', (id,))
+            existing_order = cursor.fetchone()
+            if not existing_order:
+                return jsonify({'error': '발주 정보를 찾을 수 없습니다.'}), 404
 
         return jsonify({'message': '발주 정보가 성공적으로 업데이트되었습니다.'})
     except Exception as e:
