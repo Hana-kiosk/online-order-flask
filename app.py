@@ -3,14 +3,20 @@ from flask_cors import CORS
 import mysql.connector
 from dotenv import load_dotenv
 import os
-from datetime import datetime
-
+from datetime import datetime, timedelta
+import jwt
+import bcrypt
+from functools import wraps
 
 app = Flask(__name__)
 CORS(app)  # CORS 미들웨어 설정
 PORT = 5000
 
 load_dotenv()
+
+# JWT 비밀 키 설정
+JWT_SECRET_KEY = os.getenv('JWT_SECRET_KEY', 'your-secret-key')
+JWT_EXPIRATION_DELTA = timedelta(days=1)  # 토큰 유효 기간 (1일)
 
 # MySQL 연결 설정
 def get_connection():
@@ -24,9 +30,113 @@ def get_connection():
         collation='utf8mb4_unicode_ci'
     )
 
+# 토큰 필수 데코레이터
+def token_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = None
+        auth_header = request.headers.get('Authorization')
+        
+        if auth_header and auth_header.startswith('Bearer '):
+            token = auth_header.split(' ')[1]
+        
+        if not token:
+            return jsonify({'error': '인증 토큰이 필요합니다'}), 401
+        
+        try:
+            payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=['HS256'])
+            user_id = payload['sub']
+            
+            # 사용자 존재 여부 확인
+            conn = get_connection()
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute('SELECT id, username, name, role FROM users WHERE id = %s', (user_id,))
+            user = cursor.fetchone()
+            conn.close()
+            
+            if not user:
+                return jsonify({'error': '유효하지 않은 사용자입니다'}), 401
+            
+            # 요청에 사용자 정보 추가
+            request.user = user
+            
+        except jwt.ExpiredSignatureError:
+            return jsonify({'error': '만료된 토큰입니다. 다시 로그인하세요'}), 401
+        except jwt.InvalidTokenError:
+            return jsonify({'error': '유효하지 않은 토큰입니다'}), 401
+        
+        return f(*args, **kwargs)
+    
+    return decorated
+
+# 로그인 API
+@app.route('/api/auth/login', methods=['POST'])
+def login():
+    conn = None
+    try:
+        data = request.get_json()
+        username = data.get('username')
+        password = data.get('password')
+        print(f"로그인 시도: 사용자={username}")
+        if not username or not password:
+            return jsonify({'error': '아이디와 비밀번호를 모두 입력해주세요'}), 400
+        
+        conn = get_connection()
+        cursor = conn.cursor(dictionary=True)
+        
+        # 사용자 조회
+        cursor.execute('SELECT * FROM users WHERE username = %s', (username,))
+        user = cursor.fetchone()
+        
+        if not user:
+            return jsonify({'error': '아이디 또는 비밀번호가 올바르지 않습니다'}), 401
+        
+        # 비밀번호 검증
+        if not bcrypt.checkpw(password.encode('utf-8'), user['password'].encode('utf-8')):
+            return jsonify({'error': '아이디 또는 비밀번호가 올바르지 않습니다'}), 401
+        
+        # JWT 토큰 생성
+        payload = {
+            'sub': user['id'],
+            'username': user['username'],
+            'role': user['role'],
+            'iat': datetime.utcnow(),
+            'exp': datetime.utcnow() + JWT_EXPIRATION_DELTA
+        }
+        
+        token = jwt.encode(payload, JWT_SECRET_KEY, algorithm='HS256')
+        
+        # 응답에서 비밀번호 제거
+        user.pop('password', None)
+        
+        return jsonify({
+            'token': token,
+            'user': {
+                'id': user['id'],
+                'username': user['username'],
+                'name': user['name'],
+                'role': user['role']
+            }
+        })
+        
+    except Exception as e:
+        print(f'로그인 오류 상세 정보: {str(e)}')  # 더 자세한 오류 정보
+        import traceback
+        traceback.print_exc()  # 스택 트레이스 출력
+        return jsonify({'error': '로그인 처리 중 오류가 발생했습니다'}), 500
+    finally:
+        if conn:
+            conn.close()
+
+# 현재 사용자 정보 조회 API
+@app.route('/api/auth/me', methods=['GET'])
+@token_required
+def get_current_user():
+    return jsonify(request.user)
 
 # 모든 발주 목록 조회 API
 @app.route('/api/orders', methods=['GET'])
+@token_required
 def get_orders():
     conn = None
     try:
@@ -72,6 +182,7 @@ def get_orders():
 
 # 특정 발주 조회 API
 @app.route('/api/orders/<id>', methods=['GET'])
+@token_required
 def get_order(id):
     conn = None
     try:
@@ -94,6 +205,7 @@ def get_order(id):
 
 # 발주 생성 API
 @app.route('/api/orders', methods=['POST'])
+@token_required
 def create_order():
     conn = None
     try:
@@ -179,13 +291,16 @@ def create_order():
             if expected_arrival_end_date and arrival_date > expected_arrival_end_date:
                 status = '지연'
 
+        # 현재 로그인한 사용자 ID 추가
+        user_id = request.user['id']
+
         cursor.execute(
             '''
             INSERT INTO orders (
                 id, order_date, item_code, color_name, order_quantity,
                 expected_arrival_start_date, expected_arrival_end_date,
-                arrival_date, arrival_quantity, special_note, remarks, status
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                arrival_date, arrival_quantity, special_note, remarks, status, user_id
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ''',
             (
                 new_order_id, 
@@ -199,7 +314,8 @@ def create_order():
                 order_data.get('arrival_quantity', None), 
                 order_data.get('special_note', ''), 
                 order_data.get('remarks', ''), 
-                status
+                status,
+                user_id
             )
         )
         conn.commit()
@@ -221,6 +337,7 @@ def create_order():
 
 # 발주 수정 API
 @app.route('/api/orders/<id>', methods=['PUT'])
+@token_required
 def update_order(id):
     conn = None
     try:
@@ -244,19 +361,25 @@ def update_order(id):
                 arrival_quantity = %s,
                 special_note = %s,
                 remarks = %s,
-                status = %s
+                status = %s,
+                user_id = %s
             WHERE id = %s
             ''',
             (
                 expected_arrival_start_date, expected_arrival_end_date,
                 arrival_date, order_data.get('arrival_quantity', None),
-                order_data.get('special_note', None), order_data.get('remarks', None), status, id
+                order_data.get('special_note', None), order_data.get('remarks', None), 
+                status, request.user['id'], id
             )
         )
         conn.commit()
 
+        # 영향을 받은 행이 없는 경우 발주가 존재하는지 확인
         if cursor.rowcount == 0:
-            return jsonify({'error': '발주 정보를 찾을 수 없습니다.'}), 404
+            cursor.execute('SELECT id FROM orders WHERE id = %s', (id,))
+            existing_order = cursor.fetchone()
+            if not existing_order:
+                return jsonify({'error': '발주 정보를 찾을 수 없습니다.'}), 404
 
         return jsonify({'message': '발주 정보가 성공적으로 업데이트되었습니다.'})
     except Exception as e:
@@ -268,6 +391,7 @@ def update_order(id):
 
 # 발주 삭제 API
 @app.route('/api/orders/<id>', methods=['DELETE'])
+@token_required
 def delete_order(id):
     conn = None
     try:
@@ -287,6 +411,20 @@ def delete_order(id):
     finally:
         if conn:
             conn.close()
+
+@app.route('/test-password/<password>')
+def test_password(password):
+    stored_hash = '$2b$10$rXfI/6Pl1K5YhZKQr1aZkeu7ZXmOJinp6bJlBZKm2MfU7eR7UWi8a'
+    is_valid = bcrypt.checkpw(password.encode('utf-8'), stored_hash.encode('utf-8'))
+    return jsonify({'password': password, 'is_valid': is_valid})
+
+@app.route('/generate-password-hash/<password>')
+def generate_password_hash(password):
+    hashed = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
+    return jsonify({
+        'password': password,
+        'hashed': hashed.decode('utf-8')
+    })
 
 if __name__ == '__main__':
     app.run(debug=False, port=PORT)
