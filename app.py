@@ -345,6 +345,19 @@ def update_order(id):
         cursor = conn.cursor(dictionary=True)
 
         order_data = request.get_json()
+        
+        # 기존 발주 정보 가져오기
+        cursor.execute('SELECT * FROM orders WHERE id = %s', (id,))
+        existing_order = cursor.fetchone()
+        if not existing_order:
+            return jsonify({'error': '발주 정보를 찾을 수 없습니다.'}), 404
+            
+        # 상태 변경 여부 확인
+        status_changed = 'status' in order_data and order_data['status'] != existing_order['status']
+        
+        # 상태가 변경되었는데 admin이 아닌 경우 권한 오류 반환
+        if status_changed and request.user['role'] != 'admin':
+            return jsonify({'error': '발주 상태 변경 권한이 없습니다. 관리자만 상태를 변경할 수 있습니다.'}), 403
 
         expected_arrival_start_date = order_data.get('expected_arrival_start_date')
         expected_arrival_end_date = order_data.get('expected_arrival_end_date')
@@ -388,6 +401,7 @@ def update_order(id):
     finally:
         if conn:
             conn.close()
+
 
 # 발주 삭제 API
 @app.route('/api/orders/<id>', methods=['DELETE'])
