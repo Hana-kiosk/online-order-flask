@@ -439,7 +439,7 @@ def get_inventory():
         color = request.args.get('color')
         location = request.args.get('location')
 
-        query = 'SELECT * FROM inventory'
+        query = 'SELECT * FROM inventory WHERE visible = 1'  # visible이 1인 항목만 조회
         conditions = []
         params = []
 
@@ -456,7 +456,7 @@ def get_inventory():
             params.append(f"%{location}%")
 
         if conditions:
-            query += ' WHERE ' + ' AND '.join(conditions)
+            query += ' AND ' + ' AND '.join(conditions)
         
         query += ' ORDER BY item_name DESC'
         
@@ -471,7 +471,26 @@ def get_inventory():
         if conn:
             conn.close()
 
-# 재고 추가 API
+# inventory_logs 테이블에 로그 기록 함수 추가
+def log_inventory_change(inventory_id, quantity, after_stock, memo, created_by):
+    conn = None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        query = '''
+            INSERT INTO inventory_logs (inventory_id, quantity, after_stock, memo, created_by, created_at) 
+            VALUES (%s, %s, %s, %s, %s, NOW())
+        '''
+        params = (inventory_id, quantity, after_stock, memo, created_by)
+        cursor.execute(query, params)
+        conn.commit()
+    except Exception as e:
+        print(f'로그 기록 오류: {e}')
+    finally:
+        if conn:
+            conn.close()
+
+# add_inventory API에 로그 기록 추가
 @app.route('/api/inventory', methods=['POST'])
 @token_required
 def add_inventory():
@@ -487,6 +506,7 @@ def add_inventory():
         safety_stock = data.get('safety_stock', 0)
         unit = data.get('unit', '개')
         location = data.get('location', None)
+        memo = data.get('memo', '신규 추가')  # 사용자가 제공한 memo 또는 기본값
 
         if not item_name:
             return jsonify({'error': '품목명은 필수 입력값입니다.'}), 400
@@ -500,6 +520,9 @@ def add_inventory():
         cursor.execute(query, params)
         conn.commit()
 
+        # 로그 기록
+        log_inventory_change(cursor.lastrowid, stock, stock, memo, request.user['id'])
+
         return jsonify({'message': '품목이 추가되었습니다.', 'id': cursor.lastrowid}), 201
     except Exception as e:
         print(f'품목 추가 오류: {e}')
@@ -508,14 +531,14 @@ def add_inventory():
         if conn:
             conn.close()
 
-# 재고 수정 API
+# update_inventory API에 로그 기록 추가
 @app.route('/api/inventory/<id>', methods=['PUT'])
 @token_required
 def update_inventory(id):
     conn = None
     try:
         conn = get_connection()
-        cursor = conn.cursor()
+        cursor = conn.cursor(dictionary=True)
 
         data = request.json
         item_name = data.get('item_name')
@@ -524,6 +547,7 @@ def update_inventory(id):
         safety_stock = data.get('safety_stock')
         unit = data.get('unit')
         location = data.get('location')
+        memo = data.get('memo', '수정')  # 사용자가 제공한 memo 또는 기본값
 
         # 해당 ID의 품목이 존재하는지 확인
         cursor.execute('SELECT * FROM inventory WHERE id = %s', (id,))
@@ -531,6 +555,9 @@ def update_inventory(id):
 
         if not item:
             return jsonify({'error': '해당 품목을 찾을 수 없습니다.'}), 404
+
+        # 기존 stock 값 가져오기
+        old_stock = item['stock']
 
         update_fields = []
         params = []
@@ -563,6 +590,12 @@ def update_inventory(id):
         cursor.execute(query, tuple(params))
         conn.commit()
 
+        # 변경된 수량 계산
+        quantity_change = stock - old_stock if stock is not None else 0
+
+        # 로그 기록
+        log_inventory_change(id, quantity_change, stock, memo, request.user['id'])
+
         return jsonify({'message': '품목이 수정되었습니다.'})
     except Exception as e:
         print(f'품목 수정 오류: {e}')
@@ -578,20 +611,23 @@ def delete_inventory(id):
     conn = None
     try:
         conn = get_connection()
-        cursor = conn.cursor()
+        cursor = conn.cursor(dictionary=True)
 
-        # 삭제할 품목 존재 여부 확인
+        # 해당 ID의 품목이 존재하는지 확인
         cursor.execute('SELECT * FROM inventory WHERE id = %s', (id,))
         item = cursor.fetchone()
 
         if not item:
             return jsonify({'error': '해당 품목을 찾을 수 없습니다.'}), 404
 
-        # 품목 삭제
-        cursor.execute('DELETE FROM inventory WHERE id = %s', (id,))
+        # visible 컬럼을 0으로 설정 (삭제 처리)
+        cursor.execute('UPDATE inventory SET visible = 0 WHERE id = %s', (id,))
         conn.commit()
 
-        return jsonify({'message': '품목이 삭제되었습니다.'})
+        # 로그 기록
+        log_inventory_change(id, 0, item['stock'], '삭제', request.user['id'])
+
+        return jsonify({'message': '품목이 성공적으로 삭제되었습니다.'})
     except Exception as e:
         print(f'품목 삭제 오류: {e}')
         return jsonify({'error': '품목 삭제 중 오류가 발생했습니다.'}), 500
