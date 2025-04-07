@@ -521,7 +521,7 @@ def add_inventory():
         conn.commit()
 
         # 로그 기록
-        log_inventory_change(cursor.lastrowid, stock, stock, memo, request.user['id'])
+        log_inventory_change(cursor.lastrowid, stock, stock, memo, request.user['name'])
 
         return jsonify({'message': '품목이 추가되었습니다.', 'id': cursor.lastrowid}), 201
     except Exception as e:
@@ -594,7 +594,7 @@ def update_inventory(id):
         quantity_change = stock - old_stock if stock is not None else 0
 
         # 로그 기록
-        log_inventory_change(id, quantity_change, stock, memo, request.user['id'])
+        log_inventory_change(id, quantity_change, stock, memo, request.user['name'])
 
         return jsonify({'message': '품목이 수정되었습니다.'})
     except Exception as e:
@@ -625,7 +625,7 @@ def delete_inventory(id):
         conn.commit()
 
         # 로그 기록
-        log_inventory_change(id, 0, item['stock'], '삭제', request.user['id'])
+        log_inventory_change(id, 0, item['stock'], '삭제', request.user['name'])
 
         return jsonify({'message': '품목이 성공적으로 삭제되었습니다.'})
     except Exception as e:
