@@ -649,5 +649,29 @@ def generate_password_hash(password):
         'hashed': hashed.decode('utf-8')
     })
 
+# 특정 inventory_id의 로그 조회 API
+@app.route('/api/inventory/logs/<inventory_id>', methods=['GET'])
+@token_required
+def get_inventory_logs(inventory_id):
+    conn = None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor(dictionary=True)
+
+        # inventory_id에 해당하는 로그 조회
+        cursor.execute('SELECT * FROM inventory_logs WHERE inventory_id = %s ORDER BY created_at ASC', (inventory_id,))
+        logs = cursor.fetchall()
+
+        if not logs:
+            return jsonify({'error': '해당 inventory_id에 대한 로그를 찾을 수 없습니다.'}), 404
+
+        return jsonify(logs)
+    except Exception as e:
+        print(f'로그 조회 오류: {e}')
+        return jsonify({'error': '로그를 조회하는 중 오류가 발생했습니다.'}), 500
+    finally:
+        if conn:
+            conn.close()
+
 if __name__ == '__main__':
     app.run(debug=False, port=PORT)
