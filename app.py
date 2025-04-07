@@ -650,7 +650,7 @@ def generate_password_hash(password):
     })
 
 # 특정 inventory_id의 로그 조회 API
-@app.route('/api/inventory/logs/<inventory_id>', methods=['GET'])
+@app.route('/api/inventory/<inventory_id>/logs', methods=['GET'])
 @token_required
 def get_inventory_logs(inventory_id):
     conn = None
