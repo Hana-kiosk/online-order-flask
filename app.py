@@ -439,7 +439,7 @@ def get_inventory():
         color = request.args.get('color')
         location = request.args.get('location')
 
-        query = 'SELECT * FROM inventory WHERE visible = 1'  # visible이 1인 항목만 조회
+        query = 'SELECT * FROM inventory'  # 모든 항목 조회 (visible 필터 제거)
         conditions = []
         params = []
 
@@ -631,6 +631,37 @@ def delete_inventory(id):
     except Exception as e:
         print(f'품목 삭제 오류: {e}')
         return jsonify({'error': '품목 삭제 중 오류가 발생했습니다.'}), 500
+    finally:
+        if conn:
+            conn.close()
+
+# 재고 복구 API
+@app.route('/api/inventory/<id>/restore', methods=['PUT'])
+@token_required
+def restore_inventory(id):
+    conn = None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor(dictionary=True)
+
+        # 해당 ID의 품목이 존재하는지 확인
+        cursor.execute('SELECT * FROM inventory WHERE id = %s', (id,))
+        item = cursor.fetchone()
+
+        if not item:
+            return jsonify({'error': '해당 품목을 찾을 수 없습니다.'}), 404
+
+        # visible 컬럼을 1로 설정 (복구 처리)
+        cursor.execute('UPDATE inventory SET visible = 1 WHERE id = %s', (id,))
+        conn.commit()
+
+        # 로그 기록
+        log_inventory_change(id, 0, item['stock'], '복구', request.user['name'])
+
+        return jsonify({'message': '품목이 성공적으로 복구되었습니다.'})
+    except Exception as e:
+        print(f'품목 복구 오류: {e}')
+        return jsonify({'error': '품목 복구 중 오류가 발생했습니다.'}), 500
     finally:
         if conn:
             conn.close()
