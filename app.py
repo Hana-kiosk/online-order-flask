@@ -439,7 +439,7 @@ def get_inventory():
         color = request.args.get('color')
         location = request.args.get('location')
 
-        query = 'SELECT * FROM inventory WHERE visible = 1'  # visible이 1인 항목만 조회
+        query = 'SELECT * FROM inventory'  # 모든 항목 조회 (visible 필터 제거)
         conditions = []
         params = []
 
