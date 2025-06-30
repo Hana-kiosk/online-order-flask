@@ -12,9 +12,11 @@ def create_app():
     from app.blueprints.auth_routes import auth_bp
     from app.blueprints.order_routes import order_bp
     from app.blueprints.inventory_routes import inventory_bp
+    from app.blueprints.leave_routes import leave_bp
     
     app.register_blueprint(auth_bp, url_prefix='/api/auth')
     app.register_blueprint(order_bp, url_prefix='/api')
     app.register_blueprint(inventory_bp, url_prefix='/api')
+    app.register_blueprint(leave_bp, url_prefix='/api')
     
     return app 
