@@ -65,7 +65,7 @@ def apply_leave():
             # 연차 신청 데이터 삽입
             leave_id = str(uuid.uuid4())
             insert_query = """
-                INSERT INTO leave 
+                INSERT INTO leave_requests 
                 (id, userid, name, leave_type, start_date, end_date, reason, status, applied_at, days_count)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """
@@ -82,20 +82,6 @@ def apply_leave():
                 datetime.now(),
                 business_days
             ))
-            
-            # 연가인 경우 잔여 연차 차감 (승인 후에 처리하도록 수정 가능)
-            if data['leave_type'] == '연가':
-                # 현재는 신청과 동시에 차감, 실제로는 승인 후 차감하는 것이 좋음
-                update_balance_query = """
-                    UPDATE employee_leave_balance 
-                    SET used_days = used_days + %s
-                    WHERE userid = %s AND year = %s
-                """
-                cursor.execute(update_balance_query, (
-                    business_days,
-                    data['userid'],
-                    start_date.year
-                ))
             
             connection.commit()
             
@@ -148,7 +134,7 @@ def get_leave_list():
             if userid:
                 # 특정 사용자의 연차 목록
                 query = """
-                    SELECT * FROM leave 
+                    SELECT * FROM leave_requests 
                     WHERE userid = %s 
                     ORDER BY applied_at DESC
                 """
@@ -156,7 +142,7 @@ def get_leave_list():
             else:
                 # 모든 연차 목록 (관리자용)
                 query = """
-                    SELECT * FROM leave 
+                    SELECT * FROM leave_requests 
                     ORDER BY applied_at DESC
                 """
                 cursor.execute(query)
@@ -220,7 +206,7 @@ def update_leave_status(leave_id):
         try:
             # 연차 상태 업데이트
             update_query = """
-                UPDATE leave 
+                UPDATE leave_requests 
                 SET status = %s, reviewed_at = %s, reviewed_by = %s
                 WHERE id = %s
             """
@@ -279,7 +265,7 @@ def get_leave_detail(leave_id):
         cursor = connection.cursor(dictionary=True)
         
         try:
-            query = "SELECT * FROM leave WHERE id = %s"
+            query = "SELECT * FROM leave_requests WHERE id = %s"
             cursor.execute(query, (leave_id,))
             leave = cursor.fetchone()
             
