@@ -16,7 +16,7 @@ def apply_leave():
         data = request.get_json()
         
         # 필수 필드 검증
-        required_fields = ['userid', 'name', 'leave_type', 'start_date', 'end_date']
+        required_fields = ['userid', 'employee_name', 'leave_type', 'start_date', 'end_date']
         for field in required_fields:
             if not data.get(field):
                 return jsonify({
@@ -62,26 +62,26 @@ def apply_leave():
         cursor = connection.cursor()
         
         try:
-            # 연차 신청 데이터 삽입
-            leave_id = str(uuid.uuid4())
+            # 연차 신청 데이터 삽입 (AUTO_INCREMENT이므로 id 제외)
             insert_query = """
                 INSERT INTO leave_requests 
-                (id, userid, name, leave_type, start_date, end_date, reason, status, applied_at, days_count)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                (userid, employee_name, leave_type, start_date, end_date, reason, status, days_count)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """
             
             cursor.execute(insert_query, (
-                leave_id,
                 data['userid'],
-                data['name'],
+                data['employee_name'],
                 data['leave_type'],
                 start_date,
                 end_date,
                 data.get('reason', ''),
                 'pending',
-                datetime.now(),
                 business_days
             ))
+            
+            # 생성된 ID 가져오기
+            leave_id = cursor.lastrowid
             
             connection.commit()
             
@@ -136,14 +136,14 @@ def get_leave_list():
                 query = """
                     SELECT * FROM leave_requests 
                     WHERE userid = %s 
-                    ORDER BY applied_at DESC
+                    ORDER BY created_at DESC
                 """
                 cursor.execute(query, (userid,))
             else:
                 # 모든 연차 목록 (관리자용)
                 query = """
                     SELECT * FROM leave_requests 
-                    ORDER BY applied_at DESC
+                    ORDER BY created_at DESC
                 """
                 cursor.execute(query)
             
@@ -155,10 +155,12 @@ def get_leave_list():
                     leave['start_date'] = leave['start_date'].strftime('%Y-%m-%d')
                 if leave['end_date']:
                     leave['end_date'] = leave['end_date'].strftime('%Y-%m-%d')
-                if leave['applied_at']:
-                    leave['applied_at'] = leave['applied_at'].strftime('%Y-%m-%d %H:%M:%S')
-                if leave['reviewed_at']:
-                    leave['reviewed_at'] = leave['reviewed_at'].strftime('%Y-%m-%d %H:%M:%S')
+                if leave['created_at']:
+                    leave['created_at'] = leave['created_at'].strftime('%Y-%m-%d %H:%M:%S')
+                if leave['updated_at']:
+                    leave['updated_at'] = leave['updated_at'].strftime('%Y-%m-%d %H:%M:%S')
+                if leave['approved_at']:
+                    leave['approved_at'] = leave['approved_at'].strftime('%Y-%m-%d %H:%M:%S')
             
             return jsonify(leaves), 200
             
@@ -180,7 +182,7 @@ def get_leave_list():
             'message': '서버 오류가 발생했습니다.'
         }), 500
 
-@leave_bp.route('/leave/<leave_id>/status', methods=['PUT'])
+@leave_bp.route('/leave/<int:leave_id>/status', methods=['PUT'])
 @token_required
 def update_leave_status(leave_id):
     """연차 상태 업데이트 API (관리자용)"""
@@ -204,19 +206,36 @@ def update_leave_status(leave_id):
         cursor = connection.cursor()
         
         try:
-            # 연차 상태 업데이트
-            update_query = """
-                UPDATE leave_requests 
-                SET status = %s, reviewed_at = %s, reviewed_by = %s
-                WHERE id = %s
-            """
-            
-            cursor.execute(update_query, (
-                status,
-                datetime.now(),
-                data.get('reviewed_by', request.user['name']),  # 로그인한 사용자 정보 사용
-                leave_id
-            ))
+            if status == 'approved':
+                # 승인 처리
+                update_query = """
+                    UPDATE leave_requests 
+                    SET status = %s, approver_userid = %s, approver_name = %s, approved_at = %s
+                    WHERE id = %s
+                """
+                cursor.execute(update_query, (
+                    status,
+                    data.get('approver_userid', request.user.get('id')),
+                    data.get('approver_name', request.user.get('name')),
+                    datetime.now(),
+                    leave_id
+                ))
+            else:
+                # 반려 처리
+                update_query = """
+                    UPDATE leave_requests 
+                    SET status = %s, approver_userid = %s, approver_name = %s, 
+                        approved_at = %s, rejection_reason = %s
+                    WHERE id = %s
+                """
+                cursor.execute(update_query, (
+                    status,
+                    data.get('approver_userid', request.user.get('id')),
+                    data.get('approver_name', request.user.get('name')),
+                    datetime.now(),
+                    data.get('rejection_reason', ''),
+                    leave_id
+                ))
             
             if cursor.rowcount == 0:
                 return jsonify({
@@ -226,9 +245,10 @@ def update_leave_status(leave_id):
             
             connection.commit()
             
+            status_msg = '승인' if status == 'approved' else '반려'
             return jsonify({
                 'success': True,
-                'message': f'연차가 {status}되었습니다.'
+                'message': f'연차가 {status_msg}되었습니다.'
             }), 200
             
         except Error as e:
@@ -250,7 +270,7 @@ def update_leave_status(leave_id):
             'message': '서버 오류가 발생했습니다.'
         }), 500
 
-@leave_bp.route('/leave/<leave_id>', methods=['GET'])
+@leave_bp.route('/leave/<int:leave_id>', methods=['GET'])
 @token_required
 def get_leave_detail(leave_id):
     """특정 연차 정보 조회 API"""
@@ -280,10 +300,12 @@ def get_leave_detail(leave_id):
                 leave['start_date'] = leave['start_date'].strftime('%Y-%m-%d')
             if leave['end_date']:
                 leave['end_date'] = leave['end_date'].strftime('%Y-%m-%d')
-            if leave['applied_at']:
-                leave['applied_at'] = leave['applied_at'].strftime('%Y-%m-%d %H:%M:%S')
-            if leave['reviewed_at']:
-                leave['reviewed_at'] = leave['reviewed_at'].strftime('%Y-%m-%d %H:%M:%S')
+            if leave['created_at']:
+                leave['created_at'] = leave['created_at'].strftime('%Y-%m-%d %H:%M:%S')
+            if leave['updated_at']:
+                leave['updated_at'] = leave['updated_at'].strftime('%Y-%m-%d %H:%M:%S')
+            if leave['approved_at']:
+                leave['approved_at'] = leave['approved_at'].strftime('%Y-%m-%d %H:%M:%S')
             
             return jsonify(leave), 200
             
