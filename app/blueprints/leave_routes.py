@@ -190,10 +190,10 @@ def update_leave_status(leave_id):
         data = request.get_json()
         status = data.get('status')
         
-        if status not in ['approved', 'rejected']:
+        if status not in ['approved', 'rejected', 'canceled']:
             return jsonify({
                 'success': False,
-                'message': '올바르지 않은 상태값입니다.'
+                'message': '올바르지 않은 상태값입니다. (approved, rejected, canceled만 허용)'
             }), 400
         
         connection = get_connection()
@@ -220,7 +220,7 @@ def update_leave_status(leave_id):
                     datetime.now(),
                     leave_id
                 ))
-            else:
+            elif status == 'rejected':
                 # 반려 처리
                 update_query = """
                     UPDATE leave_requests 
@@ -236,6 +236,19 @@ def update_leave_status(leave_id):
                     data.get('rejection_reason', ''),
                     leave_id
                 ))
+            else:  # status == 'canceled'
+                # 취소 처리 (승인자 정보 없이 처리)
+                update_query = """
+                    UPDATE leave_requests 
+                    SET status = %s, approved_at = %s, rejection_reason = %s
+                    WHERE id = %s
+                """
+                cursor.execute(update_query, (
+                    status,
+                    datetime.now(),
+                    data.get('rejection_reason', '사용자 취소'),
+                    leave_id
+                ))
             
             if cursor.rowcount == 0:
                 return jsonify({
@@ -245,7 +258,13 @@ def update_leave_status(leave_id):
             
             connection.commit()
             
-            status_msg = '승인' if status == 'approved' else '반려'
+            status_messages = {
+                'approved': '승인',
+                'rejected': '반려', 
+                'canceled': '취소'
+            }
+            status_msg = status_messages.get(status, status)
+            
             return jsonify({
                 'success': True,
                 'message': f'연차가 {status_msg}되었습니다.'
