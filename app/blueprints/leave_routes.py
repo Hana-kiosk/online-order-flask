@@ -59,6 +59,65 @@ def apply_leave():
                 'message': '데이터베이스 연결에 실패했습니다.'
             }), 500
         
+        # 연차 유형이 '연차'인 경우에만 잔여량 검증
+        if data['leave_type'] == '연차':
+            # 연차 잔여량 검증을 위한 cursor 생성
+            cursor_check = connection.cursor(dictionary=True)
+            try:
+                # 해당 연도의 연차 부여량 조회
+                year = start_date.year
+                balance_query = "SELECT total_granted FROM leaves WHERE user_id = %s AND year = %s"
+                cursor_check.execute(balance_query, (data['userid'], year))
+                balance_result = cursor_check.fetchone()
+                
+                if not balance_result:
+                    return jsonify({
+                        'success': False,
+                        'message': f'{year}년도 연차 부여량이 설정되지 않았습니다. 관리자에게 문의하세요.'
+                    }), 400
+                
+                total_granted = float(balance_result['total_granted'])
+                
+                # 사용된 연차 계산 (승인된 것만)
+                used_query = """
+                    SELECT COALESCE(SUM(days_count), 0) as used_days
+                    FROM leave_requests 
+                    WHERE userid = %s AND YEAR(start_date) = %s AND status = 'approved'
+                """
+                cursor_check.execute(used_query, (data['userid'], year))
+                used_result = cursor_check.fetchone()
+                used_days = float(used_result['used_days'] or 0)
+                
+                # 대기중인 연차 계산
+                pending_query = """
+                    SELECT COALESCE(SUM(days_count), 0) as pending_days
+                    FROM leave_requests 
+                    WHERE userid = %s AND YEAR(start_date) = %s AND status = 'pending'
+                """
+                cursor_check.execute(pending_query, (data['userid'], year))
+                pending_result = cursor_check.fetchone()
+                pending_days = float(pending_result['pending_days'] or 0)
+                
+                # 신청 가능한 연차량 계산
+                available_days = total_granted - used_days - pending_days
+                
+                # 신청 일수가 사용 가능한 연차를 초과하는지 확인
+                if business_days > available_days:
+                    return jsonify({
+                        'success': False,
+                        'message': f'신청 가능한 연차가 부족합니다. (신청: {business_days}일, 사용가능: {available_days}일)',
+                        'data': {
+                            'total_granted': total_granted,
+                            'used_days': used_days,
+                            'pending_days': pending_days,
+                            'available_days': available_days,
+                            'requested_days': business_days
+                        }
+                    }), 400
+                    
+            finally:
+                cursor_check.close()
+        
         cursor = connection.cursor()
         
         try:
@@ -85,14 +144,58 @@ def apply_leave():
             
             connection.commit()
             
+            # 응답에 포함할 추가 정보 계산 (연차인 경우)
+            response_data = {
+                'leave_id': leave_id,
+                'days_count': business_days,
+                'status': 'pending'
+            }
+            
+            # 연차인 경우 잔여량 정보 추가
+            if data['leave_type'] == '연차':
+                cursor_info = connection.cursor(dictionary=True)
+                try:
+                    year = start_date.year
+                    
+                    # 최신 연차 정보 다시 조회
+                    balance_query = "SELECT total_granted FROM leaves WHERE user_id = %s AND year = %s"
+                    cursor_info.execute(balance_query, (data['userid'], year))
+                    balance_result = cursor_info.fetchone()
+                    total_granted = float(balance_result['total_granted'])
+                    
+                    used_query = """
+                        SELECT COALESCE(SUM(days_count), 0) as used_days
+                        FROM leave_requests 
+                        WHERE userid = %s AND YEAR(start_date) = %s AND status = 'approved'
+                    """
+                    cursor_info.execute(used_query, (data['userid'], year))
+                    used_result = cursor_info.fetchone()
+                    used_days = float(used_result['used_days'] or 0)
+                    
+                    pending_query = """
+                        SELECT COALESCE(SUM(days_count), 0) as pending_days
+                        FROM leave_requests 
+                        WHERE userid = %s AND YEAR(start_date) = %s AND status = 'pending'
+                    """
+                    cursor_info.execute(pending_query, (data['userid'], year))
+                    pending_result = cursor_info.fetchone()
+                    pending_days = float(pending_result['pending_days'] or 0)
+                    
+                    # 잔여량 정보 추가
+                    response_data['leave_balance'] = {
+                        'total_granted': total_granted,
+                        'used_days': used_days,
+                        'pending_days': pending_days,
+                        'available_days': total_granted - used_days - pending_days
+                    }
+                    
+                finally:
+                    cursor_info.close()
+            
             return jsonify({
                 'success': True,
                 'message': '연차 신청이 완료되었습니다.',
-                'data': {
-                    'leave_id': leave_id,
-                    'days_count': business_days,
-                    'status': 'pending'
-                }
+                'data': response_data
             }), 200
             
         except Error as e:
@@ -344,4 +447,510 @@ def get_leave_detail(leave_id):
         return jsonify({
             'success': False,
             'message': '서버 오류가 발생했습니다.'
+        }), 500
+
+@leave_bp.route('/leaves', methods=['POST'])
+@token_required
+def create_leave_balance():
+    """연차 부여량 생성 API"""
+    try:
+        data = request.get_json()
+        
+        # 필수 필드 검증
+        required_fields = ['user_id', 'year', 'total_granted']
+        for field in required_fields:
+            if not data.get(field):
+                return jsonify({
+                    'success': False,
+                    'message': f'{field} 필드가 누락되었습니다.'
+                }), 400
+        
+        connection = get_connection()
+        if not connection:
+            return jsonify({
+                'success': False,
+                'message': '데이터베이스 연결에 실패했습니다.'
+            }), 500
+        
+        cursor = connection.cursor()
+        
+        try:
+            insert_query = """
+                INSERT INTO leaves (user_id, year, total_granted)
+                VALUES (%s, %s, %s)
+            """
+            
+            cursor.execute(insert_query, (
+                data['user_id'],
+                data['year'],
+                data['total_granted']
+            ))
+            
+            leave_balance_id = cursor.lastrowid
+            connection.commit()
+            
+            return jsonify({
+                'success': True,
+                'message': '연차 부여량이 생성되었습니다.',
+                'data': {
+                    'id': leave_balance_id,
+                    'user_id': data['user_id'],
+                    'year': data['year'],
+                    'total_granted': data['total_granted']
+                }
+            }), 201
+            
+        except Error as e:
+            connection.rollback()
+            print(f"데이터베이스 오류: {e}")
+            
+            # 중복 키 오류 처리
+            if e.errno == 1062:  # Duplicate entry
+                return jsonify({
+                    'success': False,
+                    'message': '해당 사용자의 해당 연도 연차 부여량이 이미 존재합니다.'
+                }), 409
+            
+            return jsonify({
+                'success': False,
+                'message': '연차 부여량 생성 중 오류가 발생했습니다.'
+            }), 500
+            
+        finally:
+            cursor.close()
+            connection.close()
+            
+    except Exception as e:
+        print(f"일반 오류: {e}")
+        return jsonify({
+            'success': False,
+            'message': '서버 오류가 발생했습니다.'
+        }), 500
+
+@leave_bp.route('/leaves', methods=['GET'])
+@token_required
+def get_leave_balances():
+    """연차 부여량 목록 조회 API"""
+    try:
+        user_id = request.args.get('user_id')
+        year = request.args.get('year')
+        
+        connection = get_connection()
+        if not connection:
+            return jsonify({
+                'success': False,
+                'message': '데이터베이스 연결에 실패했습니다.'
+            }), 500
+        
+        cursor = connection.cursor(dictionary=True)
+        
+        try:
+            # 쿼리 조건 구성
+            where_conditions = []
+            params = []
+            
+            if user_id:
+                where_conditions.append("user_id = %s")
+                params.append(user_id)
+            
+            if year:
+                where_conditions.append("year = %s")
+                params.append(year)
+            
+            # 기본 쿼리
+            query = "SELECT * FROM leaves"
+            
+            if where_conditions:
+                query += " WHERE " + " AND ".join(where_conditions)
+            
+            query += " ORDER BY year DESC, user_id"
+            
+            cursor.execute(query, params)
+            leave_balances = cursor.fetchall()
+            
+            return jsonify(leave_balances), 200
+            
+        except Error as e:
+            print(f"데이터베이스 오류: {e}")
+            return jsonify({
+                'success': False,
+                'message': '연차 부여량 조회 중 오류가 발생했습니다.'
+            }), 500
+            
+        finally:
+            cursor.close()
+            connection.close()
+            
+    except Exception as e:
+        print(f"일반 오류: {e}")
+        return jsonify({
+            'success': False,
+            'message': '서버 오류가 발생했습니다.'
+        }), 500
+
+@leave_bp.route('/leaves/<int:leave_balance_id>', methods=['PUT'])
+@token_required
+def update_leave_balance(leave_balance_id):
+    """연차 부여량 수정 API"""
+    try:
+        data = request.get_json()
+        
+        # 수정 가능한 필드들
+        allowed_fields = ['total_granted']
+        update_fields = {}
+        
+        for field in allowed_fields:
+            if field in data:
+                update_fields[field] = data[field]
+        
+        if not update_fields:
+            return jsonify({
+                'success': False,
+                'message': '수정할 필드가 없습니다.'
+            }), 400
+        
+        connection = get_connection()
+        if not connection:
+            return jsonify({
+                'success': False,
+                'message': '데이터베이스 연결에 실패했습니다.'
+            }), 500
+        
+        cursor = connection.cursor()
+        
+        try:
+            # 동적 UPDATE 쿼리 구성
+            set_clause = ", ".join([f"{field} = %s" for field in update_fields.keys()])
+            update_query = f"UPDATE leaves SET {set_clause} WHERE id = %s"
+            
+            values = list(update_fields.values()) + [leave_balance_id]
+            cursor.execute(update_query, values)
+            
+            if cursor.rowcount == 0:
+                return jsonify({
+                    'success': False,
+                    'message': '해당 연차 부여량을 찾을 수 없습니다.'
+                }), 404
+            
+            connection.commit()
+            
+            return jsonify({
+                'success': True,
+                'message': '연차 부여량이 수정되었습니다.'
+            }), 200
+            
+        except Error as e:
+            connection.rollback()
+            print(f"데이터베이스 오류: {e}")
+            return jsonify({
+                'success': False,
+                'message': '연차 부여량 수정 중 오류가 발생했습니다.'
+            }), 500
+            
+        finally:
+            cursor.close()
+            connection.close()
+            
+    except Exception as e:
+        print(f"일반 오류: {e}")
+        return jsonify({
+            'success': False,
+            'message': '서버 오류가 발생했습니다.'
+        }), 500
+
+@leave_bp.route('/leaves/<int:leave_balance_id>', methods=['DELETE'])
+@token_required
+def delete_leave_balance(leave_balance_id):
+    """연차 부여량 삭제 API"""
+    try:
+        connection = get_connection()
+        if not connection:
+            return jsonify({
+                'success': False,
+                'message': '데이터베이스 연결에 실패했습니다.'
+            }), 500
+        
+        cursor = connection.cursor()
+        
+        try:
+            delete_query = "DELETE FROM leaves WHERE id = %s"
+            cursor.execute(delete_query, (leave_balance_id,))
+            
+            if cursor.rowcount == 0:
+                return jsonify({
+                    'success': False,
+                    'message': '해당 연차 부여량을 찾을 수 없습니다.'
+                }), 404
+            
+            connection.commit()
+            
+            return jsonify({
+                'success': True,
+                'message': '연차 부여량이 삭제되었습니다.'
+            }), 200
+            
+        except Error as e:
+            connection.rollback()
+            print(f"데이터베이스 오류: {e}")
+            return jsonify({
+                'success': False,
+                'message': '연차 부여량 삭제 중 오류가 발생했습니다.'
+            }), 500
+            
+        finally:
+            cursor.close()
+            connection.close()
+            
+    except Exception as e:
+        print(f"일반 오류: {e}")
+        return jsonify({
+            'success': False,
+            'message': '서버 오류가 발생했습니다.'
+        }), 500
+
+@leave_bp.route('/leaves/<int:leave_balance_id>', methods=['GET'])
+@token_required
+def get_leave_balance(leave_balance_id):
+    """특정 연차 부여량 조회 API"""
+    try:
+        connection = get_connection()
+        if not connection:
+            return jsonify({
+                'success': False,
+                'message': '데이터베이스 연결에 실패했습니다.'
+            }), 500
+        
+        cursor = connection.cursor(dictionary=True)
+        
+        try:
+            query = "SELECT * FROM leaves WHERE id = %s"
+            cursor.execute(query, (leave_balance_id,))
+            leave_balance = cursor.fetchone()
+            
+            if not leave_balance:
+                return jsonify({
+                    'success': False,
+                    'message': '해당 연차 부여량을 찾을 수 없습니다.'
+                }), 404
+            
+            return jsonify(leave_balance), 200
+            
+        except Error as e:
+            print(f"데이터베이스 오류: {e}")
+            return jsonify({
+                'success': False,
+                'message': '연차 부여량 조회 중 오류가 발생했습니다.'
+            }), 500
+            
+        finally:
+            cursor.close()
+            connection.close()
+            
+    except Exception as e:
+        print(f"일반 오류: {e}")
+        return jsonify({
+            'success': False,
+            'message': '서버 오류가 발생했습니다.'
+        }), 500
+
+@leave_bp.route('/leaves/summary/<user_id>/<int:year>', methods=['GET'])
+@token_required
+def get_leave_summary(user_id, year):
+    """사용자별 연차 요약 정보 조회 API"""
+    try:
+        connection = get_connection()
+        if not connection:
+            return jsonify({
+                'success': False,
+                'message': '데이터베이스 연결에 실패했습니다.'
+            }), 500
+        
+        cursor = connection.cursor(dictionary=True)
+        
+        try:
+            # 연차 부여량 조회
+            balance_query = "SELECT total_granted FROM leaves WHERE user_id = %s AND year = %s"
+            cursor.execute(balance_query, (user_id, year))
+            balance_result = cursor.fetchone()
+            
+            if not balance_result:
+                return jsonify({
+                    'success': False,
+                    'message': '해당 사용자의 해당 연도 연차 부여량이 없습니다.'
+                }), 404
+            
+            total_granted = float(balance_result['total_granted'])
+            
+            # 사용한 연차 계산 (승인된 연차만)
+            used_query = """
+                SELECT COALESCE(SUM(days_count), 0) as used_days
+                FROM leave_requests 
+                WHERE userid = %s 
+                AND YEAR(start_date) = %s 
+                AND status = 'approved'
+            """
+            cursor.execute(used_query, (user_id, year))
+            used_result = cursor.fetchone()
+            used_days = float(used_result['used_days'] or 0)
+            
+            # 대기중인 연차 계산
+            pending_query = """
+                SELECT COALESCE(SUM(days_count), 0) as pending_days
+                FROM leave_requests 
+                WHERE userid = %s 
+                AND YEAR(start_date) = %s 
+                AND status = 'pending'
+            """
+            cursor.execute(pending_query, (user_id, year))
+            pending_result = cursor.fetchone()
+            pending_days = float(pending_result['pending_days'] or 0)
+            
+            # 잔여 연차 계산
+            remaining_days = total_granted - used_days
+            
+            # 실질적 잔여 연차 계산 (대기중 연차 고려)
+            effective_remaining_days = total_granted - used_days - pending_days
+            
+            # 신청 가능 연차량 (음수가 되지 않도록 보정)
+            available_for_request = max(0, effective_remaining_days)
+            
+            summary = {
+                'user_id': user_id,
+                'year': year,
+                'total_granted': total_granted,
+                'used_days': used_days,
+                'pending_days': pending_days,
+                'remaining_days': remaining_days,                    # 공식 잔여량 (승인된 것만 차감)
+                'effective_remaining_days': effective_remaining_days, # 실질 잔여량 (대기중 포함)
+                'available_for_request': available_for_request,      # 실제 신청 가능량
+                'utilization_rate': round((used_days / total_granted) * 100, 1) if total_granted > 0 else 0  # 사용률
+            }
+            
+            return jsonify(summary), 200
+            
+        except Error as e:
+            print(f"데이터베이스 오류: {e}")
+            return jsonify({
+                'success': False,
+                'message': '연차 요약 정보 조회 중 오류가 발생했습니다.'
+            }), 500
+            
+        finally:
+            cursor.close()
+            connection.close()
+            
+    except Exception as e:
+        print(f"일반 오류: {e}")
+        return jsonify({
+            'success': False,
+            'message': '서버 오류가 발생했습니다.'
+        }), 500
+
+@leave_bp.route('/api/leave/cancel/<int:leave_id>', methods=['PUT'])
+def cancel_leave(leave_id):
+    """
+    연차 신청 취소 API
+    - 사용자가 자신의 pending 상태 연차 신청을 취소할 수 있습니다.
+    - 취소된 연차는 잔여량에 즉시 반영됩니다.
+    """
+    try:
+        data = request.json
+        userid = data.get('userid')
+        
+        if not userid:
+            return jsonify({'success': False, 'message': 'userid가 필요합니다.'}), 400
+        
+        # 데이터베이스 연결
+        connection = get_connection()
+        if not connection:
+            return jsonify({'success': False, 'message': '데이터베이스 연결 실패'}), 500
+        
+        cursor = connection.cursor(dictionary=True)
+        
+        try:
+            # 취소할 연차 정보 조회 (본인의 것이고 pending 상태인지 확인)
+            select_query = """
+                SELECT * FROM leave_requests 
+                WHERE ID = %s AND userid = %s AND status = 'pending'
+            """
+            cursor.execute(select_query, (leave_id, userid))
+            leave_request = cursor.fetchone()
+            
+            if not leave_request:
+                return jsonify({
+                    'success': False, 
+                    'message': '취소할 수 있는 연차 신청을 찾을 수 없습니다. (본인의 대기중인 신청만 취소 가능)'
+                }), 404
+            
+            # 연차 신청 취소 (상태를 'cancelled'로 변경)
+            update_query = """
+                UPDATE leave_requests 
+                SET status = 'cancelled', updated_at = NOW()
+                WHERE ID = %s
+            """
+            cursor.execute(update_query, (leave_id,))
+            connection.commit()
+            
+            # 응답 데이터 준비
+            response_data = {
+                'leave_id': leave_id,
+                'status': 'cancelled',
+                'cancelled_days': leave_request['days_count']
+            }
+            
+            # 연차인 경우 최신 잔여량 정보 제공
+            if leave_request['leave_type'] == '연차':
+                cursor_info = connection.cursor(dictionary=True)
+                try:
+                    year = leave_request['start_date'].year
+                    
+                    # 연차 잔여량 정보 조회
+                    balance_query = "SELECT total_granted FROM leaves WHERE user_id = %s AND year = %s"
+                    cursor_info.execute(balance_query, (userid, year))
+                    balance_result = cursor_info.fetchone()
+                    total_granted = float(balance_result['total_granted'])
+                    
+                    used_query = """
+                        SELECT COALESCE(SUM(days_count), 0) as used_days
+                        FROM leave_requests 
+                        WHERE userid = %s AND YEAR(start_date) = %s AND status = 'approved'
+                    """
+                    cursor_info.execute(used_query, (userid, year))
+                    used_result = cursor_info.fetchone()
+                    used_days = float(used_result['used_days'] or 0)
+                    
+                    pending_query = """
+                        SELECT COALESCE(SUM(days_count), 0) as pending_days
+                        FROM leave_requests 
+                        WHERE userid = %s AND YEAR(start_date) = %s AND status = 'pending'
+                    """
+                    cursor_info.execute(pending_query, (userid, year))
+                    pending_result = cursor_info.fetchone()
+                    pending_days = float(pending_result['pending_days'] or 0)
+                    
+                    # 잔여량 정보 추가
+                    response_data['leave_balance'] = {
+                        'total_granted': total_granted,
+                        'used_days': used_days,
+                        'pending_days': pending_days,
+                        'available_days': total_granted - used_days - pending_days
+                    }
+                    
+                finally:
+                    cursor_info.close()
+            
+            return jsonify({
+                'success': True,
+                'message': '연차 신청이 취소되었습니다.',
+                'data': response_data
+            }), 200
+            
+        finally:
+            cursor.close()
+            connection.close()
+            
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'message': f'연차 취소 중 오류가 발생했습니다: {str(e)}'
         }), 500 
