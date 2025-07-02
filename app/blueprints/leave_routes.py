@@ -4,7 +4,9 @@ import uuid
 from mysql.connector import Error
 from app.database import get_connection
 from app.auth import token_required
-from app.utils import calculate_business_days
+from app.utils import calculate_business_days, load_holidays, clear_holidays_cache, load_holidays_with_details
+import csv
+import os
 
 leave_bp = Blueprint('leave', __name__)
 
@@ -953,4 +955,55 @@ def cancel_leave(leave_id):
         return jsonify({
             'success': False,
             'message': f'연차 취소 중 오류가 발생했습니다: {str(e)}'
+        }), 500
+
+@leave_bp.route('/holidays', methods=['GET'])
+@token_required
+def get_holidays():
+    """공휴일 목록 조회 API"""
+    try:
+        holidays_details = load_holidays_with_details()
+        
+        # 날짜를 문자열로 변환하여 정렬된 목록 반환
+        holiday_list = sorted([{
+            'date': holiday['date'].strftime('%Y-%m-%d'),
+            'name': holiday['name'],
+            'type': holiday['type']
+        } for holiday in holidays_details], key=lambda x: x['date'])
+        
+        return jsonify({
+            'success': True,
+            'data': holiday_list,
+            'count': len(holiday_list)
+        }), 200
+        
+    except Exception as e:
+        print(f"공휴일 조회 오류: {e}")
+        return jsonify({
+            'success': False,
+            'message': '공휴일 목록 조회 중 오류가 발생했습니다.'
+        }), 500
+
+@leave_bp.route('/holidays/reload', methods=['POST'])
+@token_required
+def reload_holidays():
+    """공휴일 데이터 다시 로드 API (관리자용)"""
+    try:
+        # 캐시 초기화
+        clear_holidays_cache()
+        
+        # 새로 로드
+        holidays = load_holidays()
+        
+        return jsonify({
+            'success': True,
+            'message': f'공휴일 데이터가 다시 로드되었습니다. ({len(holidays)}개)',
+            'count': len(holidays)
+        }), 200
+        
+    except Exception as e:
+        print(f"공휴일 리로드 오류: {e}")
+        return jsonify({
+            'success': False,
+            'message': '공휴일 데이터 리로드 중 오류가 발생했습니다.'
         }), 500 
