@@ -882,10 +882,10 @@ def cancel_leave(leave_id):
                     'message': '취소할 수 있는 연차 신청을 찾을 수 없습니다. (본인의 대기중인 신청만 취소 가능)'
                 }), 404
             
-            # 연차 신청 취소 (상태를 'cancelled'로 변경)
+            # 연차 신청 취소 (상태를 'canceled'로 변경)
             update_query = """
                 UPDATE leave_requests 
-                SET status = 'cancelled', updated_at = NOW()
+                SET status = 'canceled', updated_at = NOW()
                 WHERE ID = %s
             """
             cursor.execute(update_query, (leave_id,))
@@ -894,8 +894,8 @@ def cancel_leave(leave_id):
             # 응답 데이터 준비
             response_data = {
                 'leave_id': leave_id,
-                'status': 'cancelled',
-                'cancelled_days': leave_request['days_count']
+                'status': 'canceled',
+                'canceled_days': leave_request['days_count']
             }
             
             # 연차인 경우 최신 잔여량 정보 제공
