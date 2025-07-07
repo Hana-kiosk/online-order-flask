@@ -13,7 +13,8 @@ def create_app():
              "http://localhost:3000",
              "http://localhost:5173", 
              "http://localhost:8080",
-             "https://www.hanadesk.co.kr"  # 여기에 실제 프론트엔드 도메인을 넣어주세요
+             "https://www.hanadesk.co.kr",  # 여기에 실제 프론트엔드 도메인을 넣어주세요
+             "https://web-online-order-react-test-m47pn82w3295ead8.sel4.cloudtype.app" # test용이라 나중에 지워야함
          ],
          methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
          allow_headers=["Content-Type", "Authorization"],
